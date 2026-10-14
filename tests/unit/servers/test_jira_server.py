@@ -514,6 +514,7 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
         update_proforma_form_answers,
         update_sprint,
         update_version,
+        upload_attachments,
     )
 
     jira_sub_mcp = FastMCP(name="TestJiraSubMCP")
@@ -541,6 +542,7 @@ def test_jira_mcp(mock_jira_fetcher, mock_base_jira_config):
     jira_sub_mcp.add_tool(get_transitions)
     jira_sub_mcp.add_tool(get_worklog)
     jira_sub_mcp.add_tool(download_attachments)
+    jira_sub_mcp.add_tool(upload_attachments)
     jira_sub_mcp.add_tool(get_issue_images)
     jira_sub_mcp.add_tool(get_field_options)
     jira_sub_mcp.add_tool(get_cross_project_dependencies)
@@ -3410,6 +3412,188 @@ async def test_download_attachments_image_still_uses_embedded_resource(
     # Must be EmbeddedResource (type="resource"), unchanged from before #1419
     assert resource_content.type == "resource"
     assert resource_content.resource.mimeType == "image/png"
+
+
+@pytest.mark.anyio
+async def test_upload_attachments_base64_adds_positioned_comment(
+    jira_client, mock_jira_fetcher
+):
+    """Base64 uploads are attached and their comment placeholders are replaced."""
+    mock_jira_fetcher.config.is_cloud = True
+    mock_jira_fetcher.upload_attachments_from_content.return_value = {
+        "success": True,
+        "uploaded": [
+            {
+                "filename": "photo.png",
+                "size": 4,
+                "id": "att-1",
+                "url": "https://jira.example/attachment/att-1",
+                "content_type": "image/png",
+            },
+            {
+                "filename": "report.pdf",
+                "size": 4,
+                "id": "att-2",
+                "url": "https://jira.example/attachment/att-2",
+                "content_type": "application/pdf",
+            },
+        ],
+        "failed": [],
+    }
+    mock_jira_fetcher.add_comment.return_value = {"id": "comment-1"}
+
+    response = await jira_client.call_tool(
+        "jira_upload_attachments",
+        {
+            "issue_key": "TEST-123",
+            "attachments_base64": (
+                '[{"filename":"photo.png","content_base64":"aGVsbG8="},'
+                '{"filename":"report.pdf","content_base64":"d29ybGQ="}]'
+            ),
+            "comment": (
+                "Evidence: {{attachment:photo.png}}; "
+                "download: {{attachment:report.pdf}}"
+            ),
+        },
+    )
+
+    uploaded = mock_jira_fetcher.upload_attachments_from_content.call_args.args
+    assert uploaded[0] == "TEST-123"
+    assert uploaded[1] == [
+        {"filename": "photo.png", "content": b"hello"},
+        {"filename": "report.pdf", "content": b"world"},
+    ]
+    mock_jira_fetcher.add_comment.assert_called_once_with(
+        "TEST-123",
+        "Evidence: [photo.png](https://jira.example/attachment/att-1); "
+        "download: [report.pdf](https://jira.example/attachment/att-2)",
+        None,
+        public=None,
+    )
+    result = json.loads(response.content[0].text)
+    assert result["success"] is True
+    assert result["comment"] == {"id": "comment-1"}
+
+
+@pytest.mark.anyio
+async def test_upload_attachments_file_paths_without_comment(
+    jira_client, mock_jira_fetcher, tmp_path
+):
+    from pathlib import Path
+
+    from src.mcp_atlassian.servers import jira as jira_server
+
+    source_path = tmp_path / "document.pdf"
+    mock_jira_fetcher.upload_attachments.return_value = {
+        "success": True,
+        "uploaded": [{"filename": "document.pdf", "id": "att-1"}],
+        "failed": [],
+    }
+
+    with patch.object(
+        jira_server, "validate_safe_path", return_value=Path(source_path)
+    ):
+        response = await jira_client.call_tool(
+            "jira_upload_attachments",
+            {"issue_key": "TEST-123", "file_paths": str(source_path)},
+        )
+
+    mock_jira_fetcher.upload_attachments.assert_called_once_with(
+        "TEST-123", [str(source_path)]
+    )
+    mock_jira_fetcher.add_comment.assert_not_called()
+    result = json.loads(response.content[0].text)
+    assert result["attachments"] == [{"filename": "document.pdf", "id": "att-1"}]
+    assert result["comment"] is None
+
+
+def test_render_attachment_comment_inlines_server_images_and_appends_unplaced():
+    from src.mcp_atlassian.servers.jira import _render_attachment_comment
+
+    rendered = _render_attachment_comment(
+        "See {{attachment:photo.png}}",
+        [
+            {
+                "filename": "photo.png",
+                "url": "https://jira.example/photo.png",
+                "content_type": "image/png",
+            },
+            {
+                "filename": "report.pdf",
+                "url": "https://jira.example/report.pdf",
+                "content_type": "application/pdf",
+            },
+        ],
+        is_cloud=False,
+    )
+
+    assert rendered == (
+        "See !photo.png!\n\n[report.pdf](https://jira.example/report.pdf)"
+    )
+
+
+def test_render_attachment_comment_links_cloud_images():
+    from src.mcp_atlassian.servers.jira import _render_attachment_comment
+
+    rendered = _render_attachment_comment(
+        "See {{attachment:photo.png}}",
+        [
+            {
+                "filename": "photo.png",
+                "url": "https://jira.example/photo.png",
+                "content_type": "image/png",
+            }
+        ],
+        is_cloud=True,
+    )
+
+    assert rendered == "See [photo.png](https://jira.example/photo.png)"
+
+
+@pytest.mark.anyio
+async def test_upload_attachments_rejects_unknown_placeholder(
+    jira_client, mock_jira_fetcher
+):
+    with pytest.raises(Exception, match="must match an uploaded filename"):
+        await jira_client.call_tool(
+            "jira_upload_attachments",
+            {
+                "issue_key": "TEST-123",
+                "attachments_base64": (
+                    '[{"filename":"photo.png","content_base64":"aGVsbG8="}]'
+                ),
+                "comment": "{{attachment:missing.png}}",
+            },
+        )
+
+    mock_jira_fetcher.upload_attachments_from_content.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_upload_attachments_does_not_comment_when_placeholder_upload_fails(
+    jira_client, mock_jira_fetcher
+):
+    mock_jira_fetcher.upload_attachments_from_content.return_value = {
+        "success": False,
+        "uploaded": [],
+        "failed": [{"filename": "photo.png", "error": "Upload failed"}],
+    }
+
+    response = await jira_client.call_tool(
+        "jira_upload_attachments",
+        {
+            "issue_key": "TEST-123",
+            "attachments_base64": (
+                '[{"filename":"photo.png","content_base64":"aGVsbG8="}]'
+            ),
+            "comment": "Photo: {{attachment:photo.png}}",
+        },
+    )
+
+    mock_jira_fetcher.add_comment.assert_not_called()
+    result = json.loads(response.content[0].text)
+    assert result["comment"] is None
+    assert any("Comment was not added" in item["error"] for item in result["failed"])
 
 
 # ── jira_get_issue_images tests ──────────────────────────────────────

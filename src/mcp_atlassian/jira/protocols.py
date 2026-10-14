@@ -25,7 +25,8 @@ class AttachmentsOperationsProto(Protocol):
             file_paths: List of paths to files to upload
 
         Returns:
-            A dictionary with upload results
+            A dictionary with upload results, including attachment URLs and MIME
+            types when returned by Jira.
         """
 
     @abstractmethod
@@ -40,7 +41,8 @@ class AttachmentsOperationsProto(Protocol):
             attachments: List of dicts with 'filename' and 'content' (bytes) keys
 
         Returns:
-            A dictionary with upload results
+            A dictionary with upload results, including attachment URLs and MIME
+            types when returned by Jira.
         """
 
 

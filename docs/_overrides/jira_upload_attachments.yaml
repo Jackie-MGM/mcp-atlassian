@@ -1,0 +1,4 @@
+example: |
+  {"issue_key": "PROJ-123", "attachments_base64": "[{\"filename\":\"photo.png\",\"content_base64\":\"iVBORw0KGgo=\"},{\"filename\":\"report.pdf\",\"content_base64\":\"JVBERi0=\"}]", "comment": "Screenshot: {{attachment:photo.png}}\n\nReport: {{attachment:report.pdf}}"}
+tips: |
+  Uploads files as issue attachments. Use `{{attachment:filename}}` in the optional comment to position references; successful files without a placeholder are appended. Jira Server/Data Center renders photo attachments inline. Jira Cloud comments link to photos because issue attachment IDs cannot be used as ADF Media Services IDs. Server-readable paths must remain inside the server workspace.

@@ -480,6 +480,8 @@ class TestAttachmentsMixin:
             "id": "12345",
             "filename": "test_file.txt",
             "size": 100,
+            "content": "https://jira.example/download/12345",
+            "mimeType": "text/plain",
         }
         attachments_mixin.jira.add_attachment.return_value = mock_attachment_response
 
@@ -513,6 +515,8 @@ class TestAttachmentsMixin:
             assert result["filename"] == "test_file.txt"
             assert result["size"] == 100
             assert result["id"] == "12345"
+            assert result["url"] == "https://jira.example/download/12345"
+            assert result["content_type"] == "text/plain"
             attachments_mixin.jira.add_attachment.assert_called_once_with(
                 issue_key="TEST-123", filename="/absolute/path/test_file.txt"
             )
@@ -649,7 +653,13 @@ class TestAttachmentsMixin:
         )
         attachments_mixin.jira.no_check_headers = {"X-Atlassian-Token": "no-check"}
         attachments_mixin.jira.post.return_value = [
-            {"id": "12345", "filename": "test_file.txt", "size": 12}
+            {
+                "id": "12345",
+                "filename": "test_file.txt",
+                "size": 12,
+                "content": "https://jira.example/download/12345",
+                "mimeType": "text/plain",
+            }
         ]
 
         result = attachments_mixin.upload_attachment_from_content(
@@ -661,6 +671,8 @@ class TestAttachmentsMixin:
         assert result["filename"] == "test_file.txt"
         assert result["size"] == 12
         assert result["id"] == "12345"
+        assert result["url"] == "https://jira.example/download/12345"
+        assert result["content_type"] == "text/plain"
         attachments_mixin.jira.post.assert_called_once_with(
             "https://test.atlassian.net/rest/api/2/issue/TEST-123/attachments",
             headers={"X-Atlassian-Token": "no-check"},
@@ -820,6 +832,8 @@ class TestAttachmentsMixin:
                 "filename": f"file{i + 1}.{ext}",
                 "size": 100 * (i + 1),
                 "id": f"id{i + 1}",
+                "url": f"https://jira.example/download/id{i + 1}",
+                "content_type": "application/octet-stream",
             }
             for i, ext in enumerate(["txt", "pdf", "jpg"])
         ]
@@ -853,6 +867,8 @@ class TestAttachmentsMixin:
             assert result["uploaded"][0]["id"] == "id1"
             assert result["uploaded"][1]["id"] == "id2"
             assert result["uploaded"][2]["id"] == "id3"
+            assert result["uploaded"][0]["url"] == ("https://jira.example/download/id1")
+            assert result["uploaded"][0]["content_type"] == ("application/octet-stream")
 
     def test_upload_attachments_mixed_results(
         self, attachments_mixin: AttachmentsMixin

@@ -5,6 +5,9 @@ import base64
 import binascii
 import json
 import logging
+import mimetypes
+import re
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastmcp import Context
@@ -23,6 +26,7 @@ from mcp_atlassian.servers.error_handling import ErrorPreservingFastMCP
 from mcp_atlassian.servers.helpers import resolve_transition
 from mcp_atlassian.utils.decorators import check_write_access
 from mcp_atlassian.utils.env import get_regex_env
+from mcp_atlassian.utils.io import validate_safe_path
 from mcp_atlassian.utils.media import (
     ATTACHMENT_MAX_BYTES,
     fetch_and_encode_attachment,
@@ -309,6 +313,15 @@ def _parse_base64_attachments(
         filename = item.get("filename")
         if not filename or not isinstance(filename, str):
             raise ValueError(f"attachments_base64[{index}] requires a 'filename'.")
+        if (
+            Path(filename).name != filename
+            or "/" in filename
+            or "\\" in filename
+            or any(ord(character) < 32 for character in filename)
+        ):
+            raise ValueError(
+                f"attachments_base64[{index}] filename must be a plain filename."
+            )
 
         content_base64 = item.get("content_base64")
         if not isinstance(content_base64, str):
@@ -326,16 +339,72 @@ def _parse_base64_attachments(
             raise ValueError(msg) from e
 
         if not content:
-            raise ValueError(f"attachments_base64[{index}] ({filename}) is empty.")
+            message = f"attachments_base64[{index}] ({filename}) is empty."
+            raise ValueError(message)
         if len(content) > ATTACHMENT_MAX_BYTES:
-            raise ValueError(
-                f"attachments_base64[{index}] ({filename}) exceeds the "
+            message = (
+                "Attachment exceeds the "
                 f"{ATTACHMENT_MAX_BYTES // (1024 * 1024)} MiB inline limit."
             )
+            raise ValueError(message)
 
         decoded.append({"filename": filename, "content": content})
 
     return decoded
+
+
+def _render_attachment_comment(
+    comment: str,
+    attachments: list[dict[str, Any]],
+    *,
+    is_cloud: bool,
+) -> str:
+    """Replace attachment placeholders with Jira comment markup.
+
+    Jira Cloud comments use ADF media-service identifiers for inline images,
+    which are not returned by the issue attachment API. Cloud images therefore
+    use download links; Server/DC can render attached images inline with wiki
+    markup.
+    """
+    by_filename: dict[str, dict[str, Any]] = {}
+    for item in attachments:
+        filename = str(item["filename"])
+        if filename in by_filename:
+            message = (
+                f"Duplicate attachment filename cannot be referenced in a comment: "
+                f"{filename}"
+            )
+            raise ValueError(message)
+        by_filename[filename] = item
+    placeholder = re.compile(r"\{\{attachment:([^{}]+)\}\}")
+    used: set[str] = set()
+
+    def render_filename(filename: str) -> str:
+        attachment = by_filename.get(filename)
+        if attachment is None:
+            return f"[Attachment upload failed: {filename}]"
+
+        used.add(filename)
+        url = attachment.get("url")
+        mime_type = attachment.get("content_type") or mimetypes.guess_type(filename)[0]
+        is_image, _ = is_image_attachment(mime_type, filename)
+        if is_image and not is_cloud:
+            return f"!{filename}!"
+        if url:
+            safe_label = filename.replace("\\", "\\\\").replace("]", "\\]")
+            safe_url = str(url).replace(" ", "%20").replace(")", "%29")
+            return f"[{safe_label}]({safe_url})"
+        return filename
+
+    def render(match: re.Match[str]) -> str:
+        return render_filename(match.group(1).strip())
+
+    rendered = placeholder.sub(render, comment)
+    remaining = [item for item in attachments if item["filename"] not in used]
+    if remaining:
+        references = [render_filename(str(item["filename"])) for item in remaining]
+        rendered = f"{rendered.rstrip()}\n\n" + "\n".join(references)
+    return rendered
 
 
 @jira_mcp.tool(
@@ -1397,6 +1466,184 @@ async def download_attachments(
     )
 
     return contents
+
+
+@jira_mcp.tool(
+    tags={"jira", "write", "attachments", "toolset:jira_attachments"},
+    annotations={"title": "Upload Attachments", "destructiveHint": True},
+)
+@check_write_access
+async def upload_attachments(
+    ctx: Context,
+    issue_key: Annotated[
+        str,
+        Field(
+            description="Jira issue key (e.g., 'PROJ-123', 'ACV2-642')",
+            pattern=ISSUE_KEY_PATTERN,
+        ),
+    ],
+    file_paths: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Paths readable by the server, as a JSON array or comma-separated "
+                "list. Paths must resolve inside the server workspace. "
+                "Provide either file_paths or attachments_base64, not both."
+            ),
+            default=None,
+        ),
+    ] = None,
+    attachments_base64: Annotated[
+        str | None,
+        Field(
+            description=(
+                "JSON array of {filename, content_base64} files for remote/container "
+                "servers. Provide either this or file_paths, not both."
+            ),
+            default=None,
+        ),
+    ] = None,
+    comment: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional Markdown comment. Place files using "
+                "{{attachment:filename}}. Unplaced uploaded files are appended. "
+                "Images render inline on Server/DC; Cloud comments link to images "
+                "because Jira's issue attachment API does not provide ADF media IDs."
+            ),
+            default=None,
+        ),
+    ] = None,
+    visibility: Annotated[
+        str | None,
+        Field(
+            description="Optional comment visibility as a JSON string.",
+            default=None,
+        ),
+    ] = None,
+    public: Annotated[
+        bool | None,
+        Field(
+            description=(
+                "For Jira Service Management requests, optionally set true for a "
+                "customer-visible comment or false for an internal note."
+            ),
+            default=None,
+        ),
+    ] = None,
+) -> str:
+    """Upload files to a Jira issue and optionally comment with references.
+
+    Use ``{{attachment:filename}}`` in the optional comment to control where
+    each reference appears. Unplaced successful uploads are appended. Images
+    render inline in Server/DC comments; Jira Cloud uses clickable download
+    links because its ADF inline media nodes require Media Services IDs not
+    provided by the issue attachment API.
+    """
+    has_paths = file_paths is not None and bool(file_paths.strip())
+    has_content = attachments_base64 is not None and bool(attachments_base64.strip())
+    if has_paths == has_content:
+        raise ValueError("Provide exactly one of 'file_paths' or 'attachments_base64'.")
+
+    jira = await get_jira_fetcher(ctx)
+    if has_content:
+        decoded_files = _parse_base64_attachments(attachments_base64)
+        source_filenames = [item["filename"] for item in decoded_files]
+    else:
+        try:
+            parsed_paths = json.loads(file_paths or "")
+        except json.JSONDecodeError:
+            parsed_paths = [part.strip() for part in (file_paths or "").split(",")]
+        if not isinstance(parsed_paths, list) or not parsed_paths:
+            raise ValueError(
+                "file_paths must be a JSON array or comma-separated paths."
+            )
+        if not all(isinstance(path, str) and path.strip() for path in parsed_paths):
+            raise ValueError("file_paths must contain non-empty path strings.")
+        parsed_paths = [str(validate_safe_path(path)) for path in parsed_paths]
+        source_filenames = [Path(path).name for path in parsed_paths]
+
+    placeholder_names = (
+        re.findall(r"\{\{attachment:([^{}]+)\}\}", comment) if comment else []
+    )
+    normalized_placeholders = [name.strip() for name in placeholder_names]
+    source_filename_set = set(source_filenames)
+    unknown_names = sorted(set(normalized_placeholders) - source_filename_set)
+    if unknown_names:
+        raise ValueError(
+            "Comment placeholders must match an uploaded filename: "
+            + ", ".join(unknown_names)
+        )
+    duplicate_sources = sorted(
+        {name for name in source_filenames if source_filenames.count(name) > 1}
+    )
+    if comment and duplicate_sources:
+        raise ValueError(
+            "Uploaded filenames must be unique to support comment placeholders: "
+            + ", ".join(duplicate_sources)
+        )
+    placeholders_for_comment = set(normalized_placeholders)
+
+    if has_content:
+        result = await run_jira_fetcher_call(
+            jira.upload_attachments_from_content, issue_key, decoded_files
+        )
+    else:
+        result = await run_jira_fetcher_call(
+            jira.upload_attachments, issue_key, parsed_paths
+        )
+
+    successful_uploads = result.get("uploaded", [])
+    comment_result = None
+    if comment and successful_uploads:
+        uploaded_filenames = {item.get("filename") for item in successful_uploads}
+        missing_uploads = placeholders_for_comment - uploaded_filenames
+        if missing_uploads:
+            result.setdefault("failed", []).append(
+                {
+                    "error": (
+                        "Comment was not added because upload failed for "
+                        "placeholder(s): " + ", ".join(sorted(missing_uploads))
+                    )
+                }
+            )
+        else:
+            rendered_comment = _render_attachment_comment(
+                comment, successful_uploads, is_cloud=jira.config.is_cloud
+            )
+            visibility_dict = _parse_visibility(visibility)
+            public_value = public
+            if public is False and not jira._is_internal_only_project(issue_key):
+                public_value = None
+            comment_result = await run_jira_fetcher_call(
+                jira.add_comment,
+                issue_key,
+                rendered_comment,
+                visibility_dict,
+                public=public_value,
+            )
+    elif comment and not successful_uploads:
+        result.setdefault("failed", []).append(
+            {
+                "error": (
+                    "Comment was not added because no attachments uploaded "
+                    "successfully."
+                )
+            }
+        )
+
+    return json.dumps(
+        {
+            "success": result.get("success", False),
+            "issue_key": issue_key,
+            "attachments": result.get("uploaded", []),
+            "failed": result.get("failed", []),
+            "comment": comment_result,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 @jira_mcp.tool(

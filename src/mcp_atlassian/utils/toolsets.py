@@ -67,7 +67,7 @@ JIRA_TOOLSETS: dict[str, ToolsetDefinition] = {
     ),
     "jira_attachments": ToolsetDefinition(
         name="jira_attachments",
-        description="Attachment download and image retrieval",
+        description="Attachment upload, download, and image retrieval",
         default=False,
     ),
     "jira_users": ToolsetDefinition(

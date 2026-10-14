@@ -1,6 +1,34 @@
 ---
 title: "Jira Attachments"
-description: "Download attachments and render issue images"
+description: "Upload and download issue attachments and render images"
+---
+
+### Upload Attachments
+
+Upload files to a Jira issue and optionally comment with references.
+
+<Note>This is a **write** tool. Disabled when `READ_ONLY_MODE=true`.</Note>
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `issue_key` | `string` | Yes | Jira issue key (e.g., 'PROJ-123', 'ACV2-642') |
+| `file_paths` | `string` | No | Paths readable by the server, as a JSON array or comma-separated list. Paths must resolve inside the server workspace. Provide either file_paths or attachments_base64, not both. |
+| `attachments_base64` | `string` | No | JSON array of `{filename, content_base64}` files for remote/container servers. Provide either this or file_paths, not both. |
+| `comment` | `string` | No | Optional Markdown comment. Place files using `{{attachment:filename}}`. Unplaced uploaded files are appended. Images render inline on Server/DC; Cloud comments link to images because Jira's issue attachment API does not provide ADF media IDs. |
+| `visibility` | `string` | No | Optional comment visibility as a JSON string. |
+| `public` | `boolean` | No | For Jira Service Management requests, optionally set true for a customer-visible comment or false for an internal note. |
+**Example:**
+
+```json
+{"issue_key": "PROJ-123", "attachments_base64": "[{\"filename\":\"photo.png\",\"content_base64\":\"iVBORw0KGgo=\"},{\"filename\":\"report.pdf\",\"content_base64\":\"JVBERi0=\"}]", "comment": "Screenshot: {{attachment:photo.png}}\n\nReport: {{attachment:report.pdf}}"}
+```
+
+<Tip>
+Uploads files as issue attachments. Use `{{attachment:filename}}` in the optional comment to position references; successful files without a placeholder are appended. Jira Server/Data Center renders photo attachments inline. Jira Cloud comments link to photos because issue attachment IDs cannot be used as ADF Media Services IDs. Server-readable paths must remain inside the server workspace.
+</Tip>
+
 ---
 
 ### Download Attachments

@@ -395,12 +395,13 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
 
             # Use the Jira API to upload the file
             filename = os.path.basename(file_path)
-            with open(file_path, "rb") as file:
-                attachment = self.jira.add_attachment(
-                    issue_key=issue_key, filename=file_path
-                )
+            attachment = self.jira.add_attachment(
+                issue_key=issue_key, filename=file_path
+            )
 
             if attachment:
+                if isinstance(attachment, list):
+                    attachment = attachment[0] if attachment else None
                 file_size = os.path.getsize(file_path)
                 logger.info(
                     f"Successfully uploaded attachment {filename} to {issue_key} (size: {file_size} bytes)"
@@ -411,6 +412,12 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
                     "filename": filename,
                     "size": file_size,
                     "id": attachment.get("id")
+                    if isinstance(attachment, dict)
+                    else None,
+                    "url": attachment.get("content")
+                    if isinstance(attachment, dict)
+                    else None,
+                    "content_type": attachment.get("mimeType")
                     if isinstance(attachment, dict)
                     else None,
                 }
@@ -462,6 +469,8 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
                         "filename": result.get("filename"),
                         "size": result.get("size"),
                         "id": result.get("id"),
+                        "url": result.get("url"),
+                        "content_type": result.get("content_type"),
                     }
                 )
             else:
@@ -542,6 +551,12 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
                     "id": attachment.get("id")
                     if isinstance(attachment, dict)
                     else None,
+                    "url": attachment.get("content")
+                    if isinstance(attachment, dict)
+                    else None,
+                    "content_type": attachment.get("mimeType")
+                    if isinstance(attachment, dict)
+                    else None,
                 }
 
             logger.error(f"Failed to upload attachment {filename} to {issue_key}")
@@ -594,6 +609,8 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
                         "filename": result.get("filename"),
                         "size": result.get("size"),
                         "id": result.get("id"),
+                        "url": result.get("url"),
+                        "content_type": result.get("content_type"),
                     }
                 )
             else:
